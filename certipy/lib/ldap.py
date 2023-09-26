@@ -84,7 +84,8 @@ class LDAPConnection:
             return
         else:
             if self.scheme == "ldaps":
-                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=version)
+                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=version,
+                                ciphers='ALL:@SECLEVEL=0')
                 ldap_server = ldap3.Server(
                     self.target.target_ip,
                     use_ssl=True,
@@ -94,6 +95,8 @@ class LDAPConnection:
                     connect_timeout=self.target.timeout,
                 )
             else:
+                if self.target.ldap_channel_binding:
+                    raise Exception("LDAP channel binding is only available with LDAPS")
                 ldap_server = ldap3.Server(
                     self.target.target_ip,
                     use_ssl=False,
@@ -106,7 +109,7 @@ class LDAPConnection:
 
             if self.target.do_kerberos or self.target.use_sspi:
                 ldap_conn = ldap3.Connection(
-                    ldap_server, receive_timeout=self.target.timeout * 10
+                    ldap_server, receive_timeout=self.target.timeout * 10,
                 )
                 self.LDAP3KerberosLogin(ldap_conn)
             else:
@@ -114,6 +117,11 @@ class LDAPConnection:
                     ldap_pass = "%s:%s" % (self.target.lmhash, self.target.nthash)
                 else:
                     ldap_pass = self.target.password
+                channel_binding = {}
+                if self.target.ldap_channel_binding:
+                    if not hasattr(ldap3, 'TLS_CHANNEL_BINDING'):
+                        raise Exception("To use LDAP channel binding, install the patched ldap3 module: pip3 install git+https://github.com/ly4k/ldap3")
+                    channel_binding["channel_binding"] = ldap3.TLS_CHANNEL_BINDING if self.target.ldap_channel_binding else None
                 ldap_conn = ldap3.Connection(
                     ldap_server,
                     user=user,
@@ -121,6 +129,7 @@ class LDAPConnection:
                     authentication=ldap3.NTLM,
                     auto_referrals=False,
                     receive_timeout=self.target.timeout * 10,
+                    **channel_binding
                 )
 
         if not ldap_conn.bound:
@@ -139,9 +148,9 @@ class LDAPConnection:
                     self.port = 636
                     return self.connect()
                 else:
-                    if result["description"] == "invalidCredentials":
+                    if result["description"] == "invalidCredentials" and result["message"].split(":")[0] == "80090346":
                         raise Exception(
-                            "Failed to authenticate to LDAP. Invalid credentials"
+                            "Failed to bind to LDAP. LDAP channel binding or signing is required. Use -scheme ldaps -ldap-channel-binding"
                         )
                     raise Exception(
                         "Failed to authenticate to LDAP: (%s) %s"
@@ -198,6 +207,14 @@ class LDAPConnection:
         )
         connection.sasl_in_progress = False
         if response[0]["result"] != 0:
+            if response[0]["description"] == "invalidCredentials" and response[0]["message"].split(":")[0] == "80090346":
+                raise Exception(
+                    "Failed to bind to LDAP. LDAP channel binding or signing is required. Certipy only supports channel binding via NTLM authentication. Use -scheme ldaps -ldap-channel-binding and use a password or NTLM hash for authentication instead of Kerberos, if possible"
+                )
+            if response[0]["description"] == "strongerAuthRequired" and response[0]["message"].split(":")[0] == "00002028":
+                raise Exception(
+                    "Failed to bind to LDAP. LDAP signing is required but not supported by Certipy. Use -scheme ldaps -ldap-channel-binding and use a password or NTLM hash for authentication instead of Kerberos, if possible"
+                )
             raise Exception(response)
 
         connection.bound = True
@@ -300,7 +317,7 @@ class LDAPConnection:
             ],
         )
         if len(results) != 1:
-            return None
+            return 0
 
         result = results[0]
         machine_account_quota = result.get("ms-DS-MachineAccountQuota")
@@ -353,13 +370,11 @@ class LDAPConnection:
         if primary_group_id is not None:
             sids.add("%s-%d" % (self.domain_sid, primary_group_id))
 
-        # Add Domain Computers group if Machine Account Quota > 0
-        if self.machine_account_quota > 0:
-            logging.debug(
-                "Adding Domain Computers to list of current user's SIDs (Machine Account Quota: %d > 0)"
-                % self.machine_account_quota
-            )
-            sids.add("%s-515" % self.domain_sid)
+        # Add Domain Computers group
+        logging.debug(
+            "Adding Domain Computers to list of current user's SIDs"
+        )
+        sids.add("%s-515" % self.domain_sid)
 
         dns = [user.get("distinguishedName")]
         for sid in sids:
@@ -405,14 +420,17 @@ class LDAPConnection:
                 }
             )
 
+        attributes = [
+            "sAMAccountType",
+            "name",
+            "objectSid",
+        ]
+        # Only request msDS-GroupMSAMembership when it exists in the schema. Else the ldap3 module will return an LDAPAttributeError error.
+        if self.ldap_conn.server.schema and "msDS-GroupMSAMembership" in self.ldap_conn.server.schema.attribute_types:
+            attributes.append("msDS-GroupMSAMembership")
         results = self.search(
             "(objectSid=%s)" % sid,
-            attributes=[
-                "sAMAccountType",
-                "name",
-                "msDS-GroupMSAMembership",
-                "objectSid",
-            ],
+            attributes=attributes,
         )
 
         if len(results) != 1:

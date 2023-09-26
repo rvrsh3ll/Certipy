@@ -1,6 +1,4 @@
-import enum
-
-from certipy.lib.structs import IntFlag
+from certipy.lib.structs import IntFlag, _decompose
 
 # https://github.com/fox-it/BloodHound.py/blob/d665959c58d881900378040e6670fa12f801ccd4/bloodhound/ad/utils.py#L36
 WELLKNOWN_SIDS = {
@@ -199,7 +197,7 @@ OID_TO_STR_MAP = {
     "1.3.6.1.4.1.311.10.3.2": "Microsoft Time Stamping",
     "1.3.6.1.4.1.311.76.8.1": "Microsoft Publishe",
     "1.3.6.1.5.5.7.3.2": "Client Authentication",
-    "1.3.6.1.5.2.3.4": "PKIINIT Client Authentication",
+    "1.3.6.1.5.2.3.4": "PKINIT Client Authentication",
     "1.3.6.1.4.1.311.10.3.13": "Lifetime Signing",
     "2.5.29.37.0": "Any Purpose",
     "1.3.6.1.4.1.311.64.1.1": "Server Trust",
@@ -237,7 +235,7 @@ class ACTIVE_DIRECTORY_RIGHTS(IntFlag):
 
     def to_list(self):
         cls = self.__class__
-        members, _ = enum._decompose(cls, self._value_)
+        members, _ = _decompose(cls, self._value_)
         filtered_members = []
         for member in members:
             found = False
@@ -262,7 +260,7 @@ class CERTIFICATE_RIGHTS(IntFlag):
         if self._value_ == self.GENERIC_ALL:
             return [CERTIFICATE_RIGHTS(self.GENERIC_ALL)]
 
-        members, _ = enum._decompose(cls, self._value_)
+        members, _ = _decompose(cls, self._value_)
         filtered_members = []
         for member in members:
             if str(member) == str(member.value):
